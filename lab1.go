@@ -19,28 +19,17 @@ import (
 )
 
 func main() {
-	var mode string
-	flag.StringVar(&mode, "mode", "z", "")
-
-	var hash string
-	flag.StringVar(&hash, "hash", "", "")
-
-	var cert string
-	flag.StringVar(&cert, "cert", "./my.crt", "")
-
-	var pkey string
-	flag.StringVar(&pkey, "pkey", "./my.key", "")
-
-	var path string
-	flag.StringVar(&path, "path", "", "")
-
-	flag.Parse()
 	fmt.Println("test")
+	var mode string
+	flag.StringVar(&mode, "mode", "z", "режим работы приложения")
+	flag.Parse()
 	var err error
 	switch mode {
 	case "z":
-		err = prepareSzip()
-
+		{
+			err = prepareSzip()
+			break
+		}
 		if err != nil {
 			fmt.Printf("Ошибка: %s\nПричина:\n%s", err, debug.Stack())
 		}
@@ -55,7 +44,7 @@ func signData(data []byte) (sighed []byte, err error) {
 		return
 	}
 	var cert tls.Certificate
-	if cert, err = tls.LoadX509KeyPair("cert", "pkey"); err != nil {
+	if cert, err = tls.LoadX509KeyPair("./my.cer", "./my.key"); err != nil {
 		return
 	}
 	if len(cert.Certificate) == 0 {
@@ -100,6 +89,8 @@ func prepareSzip() (err error) {
 
 	return makeSzip(metaZip, zipData)
 }
+
+//------------------------------------------------------------------------------------
 
 func makeSzip(metaZip, dataZip []byte) (err error) {
 	resultBuf := new(bytes.Buffer)
