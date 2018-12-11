@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -21,29 +20,21 @@ import (
 	"github.com/fullsailor/pkcs7"
 )
 
-//func init() {
-//
-//	flag.StringVar(&Mode, "mode", "", "Here you should place z - to zip, sz - to sertificate zip, u - to unzip")
-//	flag.StringVar(&Hash, "hash", "", "")
-//	flag.StringVar(&CertName, "cert", "./my.crt", "")
-//	flag.StringVar(&KeyName, "pkey", "./my.key", "")
-//	flag.StringVar(&Path, "path", "./", "")
-//	flag.StringVar(&Output, "out", "archive.szip", "")
-//}
-
 var crtLocation string = "./my.cer"
 var keyLocation string = "./my.key"
+var SZipName string = "./szip.szp"
 
 func main() {
-	var hash string
+	var hash, mode, destination, source string
+	flag.StringVar(&mode, "mode", "z", "application mode: Zip, eXtract, Info")
 	flag.StringVar(&hash, "hash", "UNDEF", "hash")
-	fmt.Println("--------------------")
-	var mode string
-	flag.StringVar(&mode, "mode", "z", "режим работы приложения")
+	flag.StringVar(&destination, "d", "./unszipped/", "destination to extract to")
+	flag.StringVar(&source, "s", ".", "source of the archive")
 	flag.Parse()
+
 	switch mode {
 	case "z":
-		err := prepareSzip()
+		err := PrepareSzp(source)
 		if err != nil {
 			fmt.Printf("Error occured: %s\nReason is here:\n%s", err, debug.Stack())
 			return
@@ -51,11 +42,20 @@ func main() {
 		fmt.Println("Your archive has been successfuly Szpped")
 
 	case "i":
+		fmt.Println("Information on the archive:")
 		err := info(hash)
 		if err != nil {
-			log.Fatal(err)
+			fmt.Printf("Error occured: %s\nReason is here:\n%s", err, debug.Stack())
 			return
 		}
+
+	case "x":
+		err := Extract(destination, hash)
+		if err != nil {
+			fmt.Printf("Error occured: %s\nReason is here:\n%s", err, debug.Stack())
+			return
+		}
+		fmt.Println(filepath.Join("Your files have been successfully extracted to folder ", destination))
 
 	default:
 		fmt.Println("Uknown command. Please read manual and restart the application")
@@ -89,19 +89,19 @@ func signData(data []byte) (sighed []byte, err error) {
 
 //------------------------------------------------------------------------------------
 
-func prepareSzip() (err error) {
+func PrepareSzp(source string) (err error) {
 	var xMl, metaZip, zipData []byte
 	collector := NewFileCollector()
-	if err = collector.walkFiles("./test"); err != nil {
-		return
+	if err = collector.WalkFiles(source); err != nil {
+		return err
 	}
 
-	if xMl, err = collector.meta2xml(); err != nil {
-		return
+	if xMl, err = xml.Marshal(collector.MetaData); err != nil {
+		return err
 	}
 
 	metaCollector := NewFileCollector()
-	if err = metaCollector.packFile("meta.xml", bytes.NewReader(xMl)); err != nil {
+	if err = metaCollector.PackFile("meta.xml", bytes.NewReader(xMl)); err != nil {
 		return
 	}
 
@@ -121,13 +121,10 @@ func prepareSzip() (err error) {
 func makeSzip(metaZip, dataZip []byte) (err error) {
 	resultBuf := new(bytes.Buffer)
 
-	metaSize := make([]byte, 4)
-	binary.LittleEndian.PutUint32(metaSize, uint32(len(metaZip)))
-	if err = binary.Write(resultBuf, binary.LittleEndian, metaSize); err != nil {
+	if err = binary.Write(resultBuf, binary.LittleEndian, uint32(len(metaZip))); err != nil {
 		return
 	}
-
-	fmt.Println(len(metaZip))
+	//fmt.Println(len(metaZip))
 
 	if _, err = resultBuf.Write(metaZip); err != nil {
 		return
@@ -142,7 +139,7 @@ func makeSzip(metaZip, dataZip []byte) (err error) {
 		return
 	}
 
-	if err = ioutil.WriteFile("test.szp", signedData, 0644); err != nil {
+	if err = ioutil.WriteFile(SZipName, signedData, 0644); err != nil {
 		return
 	}
 	return
@@ -152,11 +149,11 @@ func makeSzip(metaZip, dataZip []byte) (err error) {
 
 //Единица передачи метаданных файла
 type FileMeta struct {
-	Name           string `xml:"filename"`
-	OriginalSize   uint64 `xml:"original_size"`
-	CompressedSize uint64 `xml:"compressed_size"`
-	ModTime        string `xml:"mod_time"`
-	//Sha1Hash       [20]byte `xml:"sha1_hash"`
+	Name           string   `xml:"filename"`
+	OriginalSize   uint64   `xml:"original_size"`
+	CompressedSize uint64   `xml:"compressed_size"`
+	ModTime        string   `xml:"mod_time"`
+	Sha1Hash       [20]byte `xml:"sha1_hash"`
 }
 
 //------------------------------------------------------------------------------------
@@ -183,64 +180,72 @@ func NewFileCollector() *FileCollector {
 
 //------------------------------------------------------------------------------------
 
-func (f *FileCollector) walkFiles(path string) (err error) {
+func (f *FileCollector) WalkFiles(path string) (err error) {
 	var files []os.FileInfo
 	var fileReader *os.File
 
 	if files, err = ioutil.ReadDir(path); err != nil {
-		return
+		return err
 	}
 
-	for i := range files {
-		fullPath := filepath.Join(path, files[i].Name())
+	for _, file := range files {
+		fullPath := filepath.Join(path, "/", file.Name())
 
-		if files[i].IsDir() {
-			if err = f.walkFiles(fullPath); err != nil {
-				return
+		if file.IsDir() {
+			if err = f.WalkFiles(fullPath); err != nil {
+				return err
 			}
-			continue
-		}
 
-		f.addMeta(fullPath)
-		if fileReader, err = os.Open(fullPath); err != nil {
-			return
-		}
+		} else {
+			header, err := zip.FileInfoHeader(file)
+			if err != nil {
+				fmt.Println("Couldn't get file's header")
+				return err
+			}
 
-		if err = f.packFile(fullPath, fileReader); err != nil {
-			return
+			fileBytes, err := ioutil.ReadFile(fullPath)
+			if err != nil {
+				fmt.Println("Unable to obtain bytes from a file")
+				return err
+			}
+
+			f.AddMeta(header, fullPath, fileBytes)
+			if fileReader, err = os.Open(fullPath); err != nil {
+				return err
+			}
+
+			if err = f.PackFile(fullPath, fileReader); err != nil {
+				return err
+			}
 		}
 	}
-	return
+	return err
 }
 
 //------------------------------------------------------------------------------------
 
-func (f *FileCollector) meta2xml() (js []byte, err error) {
-	js, err = xml.Marshal(f.MetaData)
-	return js, err
-}
-
-//------------------------------------------------------------------------------------
-
-func (f *FileCollector) addMeta(fullPath string) {
+func (f *FileCollector) AddMeta(header *zip.FileHeader, fullPath string, fileBytes []byte) {
 	f.MetaData = append(f.MetaData, &FileMeta{
-		Name: fullPath,
-	})
+		Name:           fullPath,
+		OriginalSize:   header.UncompressedSize64,
+		CompressedSize: header.CompressedSize64,
+		ModTime:        header.Modified.Format("Mon Jan 2 15:04:05 MST 2006"),
+		Sha1Hash:       sha1.Sum(fileBytes)})
 	return
 }
 
 //------------------------------------------------------------------------------------
 
-func (f *FileCollector) packFile(filename string, fileReader io.Reader) (err error) {
+func (f *FileCollector) PackFile(filename string, fileReader io.Reader) (err error) {
 	var fileWriter io.Writer
 	if fileWriter, err = f.Zip.Create(filename); err != nil {
-		return
+		return err
 	}
 
 	if _, err = io.Copy(fileWriter, fileReader); err != nil {
-		return
+		return err
 	}
-	return
+	return nil
 }
 
 //------------------------------------------------------------------------------------
@@ -303,12 +308,12 @@ func CheckSzp(szpLocation string, hash string) (error, *pkcs7.PKCS7) {
 //------------------------------------------------------------------------------------
 
 func info(hash string) error {
-	err, sign := CheckSzp("./test.szp", hash)
+	err, sign := CheckSzp(SZipName, hash)
 	if err != nil {
 		return err
 	}
 
-	err, fileMetas := GetMeta(sign)
+	fileMetas, err := GetMeta(sign)
 	if err != nil {
 		//fmt.Println("ошибка 1")
 		return err
@@ -325,7 +330,7 @@ func info(hash string) error {
 
 //------------------------------------------------------------------------------------
 
-func GetMeta(p *pkcs7.PKCS7) (error, []FileMeta) {
+func GetMeta(p *pkcs7.PKCS7) ([]FileMeta, error) {
 	//Read meta
 	metaSize := int32(binary.LittleEndian.Uint32(p.Content[:4]))
 	fmt.Println(metaSize)
@@ -334,7 +339,11 @@ func GetMeta(p *pkcs7.PKCS7) (error, []FileMeta) {
 	readableMeta, err := zip.NewReader(bytedMeta, bytedMeta.Size())
 	if err != nil {
 		//fmt.Println("ошибка 2")
-		return err, nil
+		return nil, err
+	}
+
+	if len(readableMeta.File) < 1 {
+		return nil, errors.New("File doesn't have meta")
 	}
 
 	metaCompressed := readableMeta.File[0] //meta.xml
@@ -342,7 +351,7 @@ func GetMeta(p *pkcs7.PKCS7) (error, []FileMeta) {
 	metaUncompressed, err := metaCompressed.Open()
 	if err != nil {
 		//fmt.Println("ошибка 3")
-		return err, nil
+		return nil, err
 	}
 	defer metaUncompressed.Close()
 
@@ -350,13 +359,91 @@ func GetMeta(p *pkcs7.PKCS7) (error, []FileMeta) {
 	metaUncompressedBody, err := ioutil.ReadAll(metaUncompressed)
 	if err != nil {
 		//fmt.Println("ошибка 4")
-		return err, nil
+		return nil, err
 	}
 	err = xml.Unmarshal(metaUncompressedBody, &fileMetas)
 	if err != nil {
 		//fmt.Println("ошибка 4")
-		return err, nil
+		return nil, err
 	}
 
-	return err, fileMetas
+	return fileMetas, err
+}
+
+//------------------------------------------------------------------------------------
+
+func Extract(destination string, hash string) error {
+	sign, err := CheckSzp(SZipName, hash)
+	if err != nil {
+		return err
+	}
+
+	fileMetas, err := GetMeta(sign)
+	if err != nil {
+		return err
+	}
+
+	metaSize := int32(binary.LittleEndian.Uint32(sign.Content[:4]))
+
+	archivedFiles := bytes.NewReader(sign.Content[4+metaSize:])
+
+	err = UnarchiveFiles(archivedFiles, fileMetas, destination)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+//------------------------------------------------------------------------------------
+
+func UnarchiveFiles(archive *bytes.Reader, fileMetas []FileMeta, destination string) error {
+	zipReader, err := zip.NewReader(archive, archive.Size())
+	if err != nil {
+		return err
+	}
+
+	// Creating folder to extract to
+	if err = os.MkdirAll(destination, 077); err != nil {
+		fmt.Println("Couldn't create a folder to extract to")
+		return err
+	}
+
+	for _, file := range zipReader.File {
+		fileInfo := file.FileInfo()
+		dirName, _ := filepath.Split(fileInfo.Name())
+
+		if dirName != "" {
+			if err = os.MkdirAll(filepath.Join(destination, "/", dirName), 077); err != nil {
+				fmt.Println("Couldn't extract a folder")
+				return err
+			}
+		}
+
+		accessFile, err := file.Open() // gives io.ReadCloser
+		if err != nil {
+			fmt.Println("Unable to access a file")
+			return err
+		}
+
+		fileGuts, err := ioutil.ReadAll(accessFile) // read file's bytes to buffer
+		if err != nil {
+			fmt.Println("Unable to read a file")
+			return err
+		}
+
+		// Verifying hash for each file
+		for _, metaData := range fileMetas {
+			if metaData.Name == fileInfo.Name() {
+				if metaData.Sha1Hash != sha1.Sum(fileGuts) {
+					return errors.New(filepath.Join(file.Name, "'s hash is corrupted. The archive can't be fully unszipped"))
+				}
+			}
+		}
+
+		if err = ioutil.WriteFile(filepath.Join(destination, "/", fileInfo.Name()), fileGuts, 077); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
